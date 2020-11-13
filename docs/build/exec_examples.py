@@ -155,7 +155,7 @@ def exec_examples():
             error('file not used anywhere')
 
         file_text = file.read_text('utf-8')
-        if '\n\n\n' in file_text:
+        if '\n\n\n\n' in file_text:
             error('too many new lines')
         if not file_text.endswith('\n'):
             error('no trailing new line')
@@ -206,6 +206,13 @@ def exec_examples():
             pass
         else:
             lines = lines[ignore_above + 1 :]
+
+        try:
+            ignore_below = lines.index('# ignore-below')
+        except ValueError:
+            pass
+        else:
+            lines = lines[:ignore_below]
 
         lines = '\n'.join(lines).split('\n')
         if any(len(l) > MAX_LINE_LENGTH for l in lines):

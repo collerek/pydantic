@@ -32,7 +32,7 @@ Options:
 
 **`fields`**
 : a `dict` containing schema information for each field; this is equivalent to
-  using [the schema](schema.md) class (default: `None`)
+  using [the `Field` class](schema.md) (default: `None`)
 
 **`validate_assignment`**
 : whether to perform validation on *assignment* to attributes (default: `False`)
@@ -92,6 +92,11 @@ Similarly, if using the `@dataclass` decorator:
 {!.tmp_examples/model_config_dataclass.py!}
 ```
 _(This script is complete, it should run "as is")_
+
+
+**`underscore_attrs_are_private`**
+: whether to treat any underscore non-class var attrs as private, or leave them as is; See [Private model attributes](models.md#private-model-attributes)
+
 
 ## Alias Generator
 

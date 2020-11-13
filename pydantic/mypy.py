@@ -246,7 +246,8 @@ class PydanticModelTransformer:
                 # Basically, it is an edge case when dealing with complex import logic
                 # This is the same logic used in the dataclasses plugin
                 continue
-            assert isinstance(node, Var)
+            if not isinstance(node, Var):
+                continue
 
             # x: ClassVar[int] is ignored by dataclasses.
             if node.is_classvar:
@@ -327,7 +328,7 @@ class PydanticModelTransformer:
         construct_arguments = [fields_set_argument] + construct_arguments
 
         obj_type = ctx.api.named_type('__builtins__.object')
-        self_tvar_name = 'Model'
+        self_tvar_name = '_PydanticBaseModel'  # Make sure it does not conflict with other names in the class
         tvar_fullname = ctx.cls.fullname + '.' + self_tvar_name
         tvd = TypeVarDef(self_tvar_name, tvar_fullname, -1, [], obj_type)
         self_tvar_expr = TypeVarExpr(self_tvar_name, tvar_fullname, [], obj_type)

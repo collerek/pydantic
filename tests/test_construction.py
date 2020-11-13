@@ -1,9 +1,9 @@
 import pickle
-from typing import List
+from typing import Any, List
 
 import pytest
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class Model(BaseModel):
@@ -58,6 +58,8 @@ def test_simple_copy():
 
 
 class ModelTwo(BaseModel):
+    __foo__ = PrivateAttr({'private'})
+
     a: float
     b: int = 10
     c: str = 'foobar'
@@ -66,6 +68,7 @@ class ModelTwo(BaseModel):
 
 def test_deep_copy():
     m = ModelTwo(a=24, d=Model(a='12'))
+    m.__foo__ = {'new value'}
     m2 = m.copy(deep=True)
 
     assert m.a == m2.a == 24
@@ -74,6 +77,8 @@ def test_deep_copy():
     assert m.d is not m2.d
     assert m == m2
     assert m.__fields__ == m2.__fields__
+    assert m.__foo__ == m2.__foo__
+    assert m.__foo__ is not m2.__foo__
 
 
 def test_copy_exclude():
@@ -215,6 +220,7 @@ def test_recursive_pickle():
     assert m.d.a == 123.45
     assert m2.d.a == 123.45
     assert m.__fields__ == m2.__fields__
+    assert m.__foo__ == m2.__foo__
 
 
 def test_immutable_copy():
@@ -257,3 +263,31 @@ def test_copy_update_exclude():
 
     assert m._calculate_keys(exclude={'x'}, include=None, exclude_unset=False) == {'c', 'd'}
     assert m._calculate_keys(exclude={'x'}, include=None, exclude_unset=False, update={'c': 42}) == {'d'}
+
+
+def test_shallow_copy_modify():
+    class X(BaseModel):
+        val: int
+        deep: Any
+
+    x = X(val=1, deep={'deep_thing': [1, 2]})
+
+    y = x.copy()
+    y.val = 2
+    y.deep['deep_thing'].append(3)
+
+    assert x.val == 1
+    assert y.val == 2
+    # deep['deep_thing'] gets modified
+    assert x.deep['deep_thing'] == [1, 2, 3]
+    assert y.deep['deep_thing'] == [1, 2, 3]
+
+
+def test_construct_default_factory():
+    class Model(BaseModel):
+        foo: List[int] = Field(default_factory=list)
+        bar: str = 'Baz'
+
+    m = Model.construct()
+    assert m.foo == []
+    assert m.bar == 'Baz'

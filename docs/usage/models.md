@@ -37,20 +37,20 @@ if no `ValidationError` is raised, you know the resulting model instance is vali
 ```py
 assert user.id == 123
 ```
-fields of a model can be accessed as normal attributes of the user object
-the string '123' has been cast to an int as per the field type
+Fields of a model can be accessed as normal attributes of the user object.
+The string '123' has been cast to an int as per the field type
 ```py
 assert user.name == 'Jane Doe'
 ```
-name wasn't set when user was initialised, so it has the default value
+`name` wasn't set when user was initialised, so it has the default value
 ```py
 assert user.__fields_set__ == {'id'}
 ```
-the fields which were supplied when user was initialised:
+The fields which were supplied when user was initialised:
 ```py
 assert user.dict() == dict(user) == {'id': 123, 'name': 'Jane Doe'}
 ```
-either `.dict()` or `dict(user)` will provide a dict of fields, but `.dict()` can take numerous other arguments.
+Either `.dict()` or `dict(user)` will provide a dict of fields, but `.dict()` can take numerous other arguments.
 ```py
 user.id = 321
 assert user.id == 321
@@ -71,7 +71,7 @@ Models possess the following methods and attributes:
   cf. [exporting models](exporting_models.md#modeljson)
 
 `copy()`
-: returns a deep copy of the model; cf. [exporting models](exporting_models.md#modeldcopy)
+: returns a copy (by default, shallow copy) of the model; cf. [exporting models](exporting_models.md#modelcopy)
 
 `parse_obj()`
 : a utility for loading any object into a model with error handling if the object is not a dictionary;
@@ -81,7 +81,7 @@ Models possess the following methods and attributes:
 : a utility for loading strings of numerous formats; cf. [helper functions](#helper-functions)
 
 `parse_file()`
-: like `parse_raw()` but for files; cf. [helper function](#helper-functions)
+: like `parse_raw()` but for file paths; cf. [helper function](#helper-functions)
 
 `from_orm()`
 : loads data into a model from an arbitrary class; cf. [ORM mode](#orm-mode-aka-arbitrary-class-instances)
@@ -131,6 +131,22 @@ The example here uses SQLAlchemy, but the same approach should work for any ORM.
 {!.tmp_examples/models_orm_mode.py!}
 ```
 _(This script is complete, it should run "as is")_
+
+### Reserved names
+
+You may want to name a Column after a reserved SQLAlchemy field. In that case, Field aliases will be
+convenient:
+
+```py
+{!.tmp_examples/models_orm_mode_reserved_name.py!}
+```
+_(This script is complete, it should run "as is")_
+
+!!! note
+    The example above works because aliases have priority over field names for
+    field population. Accessing `SQLModel`'s `metadata` attribute would lead to a `ValidationError`.
+
+### Recursive ORM models
 
 ORM instances will be parsed with `from_orm` recursively as well as at the top level.
 
@@ -222,7 +238,7 @@ _(This script is complete, it should run "as is")_
   rather than keyword arguments. If the object passed is not a dict a `ValidationError` will be raised.
 * **`parse_raw`**: this takes a *str* or *bytes* and parses it as *json*, then passes the result to `parse_obj`.
   Parsing *pickle* data is also supported by setting the `content_type` argument appropriately.
-* **`parse_file`**: this reads a file and passes the contents to `parse_raw`. If `content_type` is omitted,
+* **`parse_file`**: this takes in a file path, reads the file and passes the contents to `parse_raw`. If `content_type` is omitted,
   it is inferred from the file's extension.
 
 ```py
@@ -263,12 +279,11 @@ For example, in the example above, if `_fields_set` was not provided,
 
 ## Generic Models
 
-!!! note
-    New in version **v0.29**.
-
-    This feature requires Python 3.7+.
-
 Pydantic supports the creation of generic models to make it easier to reuse a common model structure.
+
+!!! warning
+    Generic models are only supported with python `>=3.7`, this is because of numerous subtle changes in how
+    generics are implemented between python 3.6 and python 3.7.
 
 In order to declare a generic model, you perform the following steps:
 
@@ -301,6 +316,14 @@ To inherit from a GenericModel without replacing the `TypeVar` instance, a class
 
 ```py
 {!.tmp_examples/models_generics_inheritance.py!}
+```
+_(This script is complete, it should run "as is")_
+
+You can also create a generic subclass of a `GenericModel` that partially or fully replaces the type 
+parameters in the superclass.
+
+```py
+{!.tmp_examples/models_generics_inheritance_extend.py!}
 ```
 _(This script is complete, it should run "as is")_
 
@@ -355,6 +378,12 @@ extending a base model with extra fields.
 {!.tmp_examples/models_dynamic_inheritance.py!}
 ```
 
+You can also add validators by passing a dict to the `__validators__` argument.
+
+```py
+{!.tmp_examples/models_dynamic_validators.py!}
+```
+
 ## Custom Root Types
 
 Pydantic models can be defined with a custom root type by declaring the `__root__` field. 
@@ -385,6 +414,12 @@ This is demonstrated in the following example:
 !!! warning
     Calling the `parse_obj` method on a dict with the single key `"__root__"` for non-mapping custom root types
     is currently supported for backwards compatibility, but is not recommended and may be dropped in a future version.
+    
+If you want to access items in the `__root__` field directly or to iterate over the items, you can implement custom `__iter__` and `__getitem__` functions, as shown in the following example.
+
+```py
+{!.tmp_examples/models_custom_root_access.py!}
+```
 
 ## Faux Immutability
 
@@ -491,6 +526,31 @@ _(This script is complete, it should run "as is")_
 
 Where `Field` refers to the [field function](schema.md#field-customisation).
 
+!!! warning
+    The `default_factory` expects the field type to be set.
+    Moreover if you want to validate default values with `validate_all`,
+    *pydantic* will need to call the `default_factory`, which could lead to side effects!
+
+## Private model attributes
+
+If you need to use internal attributes excluded from model fields, you can declare them using `PrivateAttr`:
+
+```py
+{!.tmp_examples/private_attributes.py!}
+```
+_(This script is complete, it should run "as is")_
+
+Private attribute names must start with underscore to prevent conflicts with model fields: both `_attr` and `__attr__` 
+are supported.
+
+If `Config.underscore_attrs_are_private` is `True`, any non-ClassVar underscore attribute will be treated as private:
+```py
+{!.tmp_examples/private_attributes_underscore_attrs_are_private.py!}
+```
+_(This script is complete, it should run "as is")_
+
+Upon class creation pydantic constructs `__slots__` filled with private attributes.
+
 ## Parsing data into a specified type
 
 Pydantic includes a standalone utility function `parse_obj_as` that can be used to apply the parsing
@@ -507,8 +567,8 @@ _(This script is complete, it should run "as is")_
 
 This function is capable of parsing data into any of the types pydantic can handle as fields of a `BaseModel`.
 
-Pydantic also includes a similar standalone function called `parse_file_as`,
-which is analogous to `BaseModel.parse_file`.
+Pydantic also includes two similar standalone functions called `parse_file_as` and `parse_raw_as`,
+which are analogous to `BaseModel.parse_file` and `BaseModel.parse_raw`.
 
 ## Data Conversion
 

@@ -1,3 +1,166 @@
+## v1.7.2 (2020-11-01)
+
+* fix slow `GenericModel` concrete model creation, allow `GenericModel` concrete name reusing in module, #2078 by @MrMrRobat
+* keep the order of the fields when `validate_assignment` is set, #2073 by @PrettyWood
+* forward all the params of the stdlib `dataclass` when converted into _pydantic_ `dataclass`, #2065 by @PrettyWood
+
+## v1.7.1 (2020-10-28)
+
+Thank you to pydantic's sponsors:
+@timdrijvers, @BCarley, @chdsbd, @tiangolo, @matin, @linusg, @kevinalh, @jorgecarleitao, @koxudaxi, @primer-api, @mkeen
+for their kind support.
+
+* fix annotation of `validate_arguments` when passing configuration as argument, #2055 by @layday
+* Fix mypy assignment error when using `PrivateAttr`, #2048 by @aphedges
+* fix `underscore_attrs_are_private` causing `TypeError` when overriding `__init__`, #2047 by @samuelcolvin
+* Fixed regression introduced in v1.7 involving exception handling in field validators when `validate_assignment=True`, #2044 by @johnsabath
+* fix: _pydantic_ `dataclass` can inherit from stdlib `dataclass`
+  and `Config.arbitrary_types_allowed` is supported, #2042 by @PrettyWood
+
+## v1.7 (2020-10-26)
+
+Thank you to pydantic's sponsors:
+@timdrijvers, @BCarley, @chdsbd, @tiangolo, @matin, @linusg, @kevinalh, @jorgecarleitao, @koxudaxi, @primer-api 
+for their kind support.
+
+### Highlights
+
+* python 3.9 support, thanks @PrettyWood
+* [Private model attributes](https://pydantic-docs.helpmanual.io/usage/models/#private-model-attributes), thanks @MrMrRobat
+* ["secrets files" support in `BaseSettings`](https://pydantic-docs.helpmanual.io/usage/settings/#secret-support), thanks @mdgilene
+* [convert stdlib dataclasses to pydantic dataclasses and use stdlib dataclasses in models](https://pydantic-docs.helpmanual.io/usage/dataclasses/#stdlib-dataclasses-and-pydantic-dataclasses), thanks @PrettyWood
+
+### Changes
+
+* **Breaking Change:** remove `__field_defaults__`, add `default_factory` support with `BaseModel.construct`.
+  Use `.get_default()` method on fields in `__fields__` attribute instead, #1732 by @PrettyWood
+* Rearrange CI to run linting as a separate job, split install recipes for different tasks, #2020 by @samuelcolvin
+* Allows subclasses of generic models to make some, or all, of the superclass's type parameters concrete, while 
+  also defining new type parameters in the subclass, #2005 by @choogeboom
+* Call validator with the correct `values` parameter type in `BaseModel.__setattr__`,
+  when `validate_assignment = True` in model config, #1999 by @me-ransh
+* Force `fields.Undefined` to be a singleton object, fixing inherited generic model schemas, #1981 by @daviskirk
+* Include tests in source distributions, #1976 by @sbraz
+* Add ability to use `min_length/max_length` constraints with secret types, #1974 by @uriyyo
+* Also check `root_validators` when `validate_assignment` is on, #1971 by @PrettyWood
+* Fix const validators not running when custom validators are present, #1957 by @hmvp
+* add `deque` to field types, #1935 by @wozniakty
+* add basic support for python 3.9, #1832 by @PrettyWood
+* Fix typo in the anchor of exporting_models.md#modelcopy and incorrect description, #1821 by @KimMachineGun
+* Added ability for `BaseSettings` to read "secret files", #1820 by @mdgilene
+* add `parse_raw_as` utility function, #1812 by @PrettyWood
+* Support home directory relative paths for `dotenv` files (e.g. `~/.env`), #1803 by @PrettyWood
+* Clarify documentation for `parse_file` to show that the argument
+  should be a file *path* not a file-like object, #1794 by @mdavis-xyz
+* Fix false positive from mypy plugin when a class nested within a `BaseModel` is named `Model`, #1770 by @selimb
+* add basic support of Pattern type in schema generation, #1767 by @PrettyWood
+* Support custom title, description and default in schema of enums, #1748 by @PrettyWood
+* Properly represent `Literal` Enums when `use_enum_values` is True, #1747 by @noelevans
+* Allows timezone information to be added to strings to be formatted as time objects. Permitted formats are `Z` for UTC 
+  or an offset for absolute positive or negative time shifts. Or the timezone data can be omitted, #1744 by @noelevans
+* Add stub `__init__` with python 3.6 signature for `ForwardRef`, #1738 by @sirtelemak
+* Fix behaviour with forward refs and optional fields in nested models, #1736 by @PrettyWood
+* add `Enum` and `IntEnum` as valid types for fields, #1735 by @PrettyWood
+* Change default value of `__module__` argument of `create_model` from `None` to `'pydantic.main'`. 
+  Set reference of created concrete model to it's module to allow pickling (not applied to models created in 
+  functions), #1686 by @MrMrRobat
+* Add private attributes support, #1679 by @MrMrRobat
+* add `config` to `@validate_arguments`, #1663 by @samuelcolvin
+* Allow descendant Settings models to override env variable names for the fields defined in parent Settings models with 
+  `env` in their `Config`. Previously only `env_prefix` configuration option was applicable, #1561 by @ojomio
+* Support `ref_template` when creating schema `$ref`s, #1479 by @kilo59
+* Add a `__call__` stub to `PyObject` so that mypy will know that it is callable, #1352 by @brianmaissy
+* `pydantic.dataclasses.dataclass` decorator now supports built-in `dataclasses.dataclass`.
+  It is hence possible to convert an existing `dataclass` easily to add *pydantic* validation.
+  Moreover nested dataclasses are also supported, #744 by @PrettyWood
+
+## v1.6.1 (2020-07-15)
+
+* fix validation and parsing of nested models with `default_factory`, #1710 by @PrettyWood
+
+## v1.6 (2020-07-11)
+
+Thank you to pydantic's sponsors: @matin, @tiangolo, @chdsbd, @jorgecarleitao, and 1 anonymous sponsor for their kind support.
+
+* Modify validators for `conlist` and `conset` to not have `always=True`, #1682 by @samuelcolvin
+* add port check to `AnyUrl` (can't exceed 65536) ports are 16 insigned bits: `0 <= port <= 2**16-1` src: [rfc793 header format](https://tools.ietf.org/html/rfc793#section-3.1), #1654 by @flapili
+* Document default `regex` anchoring semantics, #1648 by @yurikhan
+* Use `chain.from_iterable` in class_validators.py. This is a faster and more idiomatic way of using `itertools.chain`.
+  Instead of computing all the items in the iterable and storing them in memory, they are computed one-by-one and never
+  stored as a huge list. This can save on both runtime and memory space, #1642 by @cool-RR
+* Add `conset()`, analogous to `conlist()`, #1623 by @patrickkwang
+* make *pydantic* errors (un)pickable, #1616 by @PrettyWood
+* Allow custom encoding for `dotenv` files, #1615 by @PrettyWood
+* Ensure `SchemaExtraCallable` is always defined to get type hints on BaseConfig, #1614 by @PrettyWood
+* Update datetime parser to support negative timestamps, #1600 by @mlbiche
+* Update mypy, remove `AnyType` alias for `Type[Any]`, #1598 by @samuelcolvin
+* Adjust handling of root validators so that errors are aggregated from _all_ failing root validators, instead of reporting on only the first root validator to fail, #1586 by @beezee
+* Make `__modify_schema__` on Enums apply to the enum schema rather than fields that use the enum, #1581 by @therefromhere
+* Fix behavior of `__all__` key when used in conjunction with index keys in advanced include/exclude of fields that are sequences, #1579 by @xspirus
+* Subclass validators do not run when referencing a `List` field defined in a parent class when `each_item=True`. Added an example to the docs illustrating this, #1566 by @samueldeklund
+* change `schema.field_class_to_schema` to support `frozenset` in schema, #1557 by @wangpeibao
+* Call `__modify_schema__` only for the field schema, #1552 by @PrettyWood
+* Move the assignment of `field.validate_always` in `fields.py` so the `always` parameter of validators work on inheritance, #1545 by @dcHHH
+* Added support for UUID instantiation through 16 byte strings such as `b'\x12\x34\x56\x78' * 4`. This was done to support `BINARY(16)` columns in sqlalchemy, #1541 by @shawnwall
+* Add a test assertion that `default_factory` can return a singleton, #1523 by @therefromhere
+* Add `NameEmail.__eq__` so duplicate `NameEmail` instances are evaluated as equal, #1514 by @stephen-bunn
+* Add datamodel-code-generator link in pydantic document site, #1500 by @koxudaxi
+* Added a "Discussion of Pydantic" section to the documentation, with a link to "Pydantic Introduction" video by Alexander Hultnér, #1499 by @hultner
+* Avoid some side effects of `default_factory` by calling it only once
+  if possible and by not setting a default value in the schema, #1491 by @PrettyWood
+* Added docs about dumping dataclasses to JSON, #1487 by @mikegrima
+* Make `BaseModel.__signature__` class-only, so getting `__signature__` from model instance will raise `AttributeError`, #1466 by @MrMrRobat
+* include `'format': 'password'` in the schema for secret types, #1424 by @atheuz
+* Modify schema constraints on `ConstrainedFloat` so that `exclusiveMinimum` and
+  minimum are not included in the schema if they are equal to `-math.inf` and
+  `exclusiveMaximum` and `maximum` are not included if they are equal to `math.inf`, #1417 by @vdwees
+* Squash internal `__root__` dicts in `.dict()` (and, by extension, in `.json()`), #1414 by @patrickkwang
+* Move `const` validator to post-validators so it validates the parsed value, #1410 by @selimb
+* Fix model validation to handle nested literals, e.g. `Literal['foo', Literal['bar']]`, #1364 by @DBCerigo
+* Remove `user_required = True` from `RedisDsn`, neither user nor password are required, #1275 by @samuelcolvin
+* Remove extra `allOf` from schema for fields with `Union` and custom `Field`, #1209 by @mostaphaRoudsari
+* Updates OpenAPI schema generation to output all enums as separate models.
+  Instead of inlining the enum values in the model schema, models now use a `$ref`
+  property to point to the enum definition, #1173 by @calvinwyoung
+
+## v1.5.1 (2020-04-23)
+
+* Signature generation with `extra: allow` never uses a field name, #1418 by @prettywood
+* Avoid mutating `Field` default value, #1412 by @prettywood
+
+## v1.5 (2020-04-18)
+
+* Make includes/excludes arguments for `.dict()`, `._iter()`, ..., immutable, #1404 by @AlexECX
+* Always use a field's real name with includes/excludes in `model._iter()`, regardless of `by_alias`, #1397 by @AlexECX
+* Update constr regex example to include start and end lines, #1396 by @lmcnearney
+* Confirm that shallow `model.copy()` does make a shallow copy of attributes, #1383 by @samuelcolvin
+* Renaming `model_name` argument of `main.create_model()` to `__model_name` to allow using `model_name` as a field name, #1367 by @kittipatv
+* Replace raising of exception to silent passing  for non-Var attributes in mypy plugin, #1345 by @b0g3r
+* Remove `typing_extensions` dependency for python 3.8, #1342 by @prettywood
+* Make `SecretStr` and `SecretBytes` initialization idempotent, #1330 by @atheuz
+* document making secret types dumpable using the json method, #1328 by @atheuz
+* Move all testing and build to github actions, add windows and macos binaries, 
+  thank you @StephenBrown2 for much help, #1326 by @samuelcolvin
+* fix card number length check in `PaymentCardNumber`, `PaymentCardBrand` now inherits from `str`, #1317 by @samuelcolvin
+* Have `BaseModel` inherit from `Representation` to make mypy happy when overriding `__str__`, #1310 by @FuegoFro
+* Allow `None` as input to all optional list fields, #1307 by @prettywood
+* Add `datetime` field to `default_factory` example, #1301 by @StephenBrown2
+* Allow subclasses of known types to be encoded with superclass encoder, #1291 by @StephenBrown2
+* Exclude exported fields from all elements of a list/tuple of submodels/dicts with `'__all__'`, #1286 by @masalim2
+* Add pydantic.color.Color objects as available input for Color fields, #1258 by @leosussan
+* In examples, type nullable fields as `Optional`, so that these are valid mypy annotations, #1248 by @kokes
+* Make `pattern_validator()` accept pre-compiled `Pattern` objects. Fix `str_validator()` return type to `str`, #1237 by @adamgreg
+* Document how to manage Generics and inheritance, #1229 by @esadruhn
+* `update_forward_refs()` method of BaseModel now copies `__dict__` of class module instead of modyfying it, #1228 by @paul-ilyin
+* Support instance methods and class methods with `@validate_arguments`, #1222 by @samuelcolvin
+* Add `default_factory` argument to `Field` to create a dynamic default value by passing a zero-argument callable, #1210 by @prettywood
+* add support for `NewType` of `List`, `Optional`, etc, #1207 by @Kazy
+* fix mypy signature for `root_validator`, #1192 by @samuelcolvin
+* Fixed parsing of nested 'custom root type' models, #1190 by @Shados
+* Add `validate_arguments` function decorator which checks the arguments to a function matches type annotations, #1179 by @samuelcolvin
+* Add `__signature__` to models, #1034 by @MrMrRobat
+* Refactor `._iter()` method, 10x speed boost for `dict(model)`, #1017 by @MrMrRobat
+
 ## v1.4 (2020-01-24)
 
 * **Breaking Change:** alias precedence logic changed so aliases on a field always take priority over
@@ -159,6 +322,8 @@
   `Model._custom_root_type` -> `Model.__custom_root_type__`, #851 by @samuelcolvin
 
 ## v0.32.2 (2019-08-17)
+
+(Docs are available [here](https://5d584fcca7c9b70007d1c997--pydantic-docs.netlify.com))
 
 * fix `__post_init__` usage with dataclass inheritance, fix #739 by @samuelcolvin
 * fix required fields validation on GenericModels classes, #742 by @amitbl

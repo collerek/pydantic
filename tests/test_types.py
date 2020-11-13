@@ -3,12 +3,13 @@ import os
 import re
 import sys
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
 from typing import (
+    Deque,
     Dict,
     FrozenSet,
     Iterable,
@@ -36,6 +37,7 @@ from pydantic import (
     ConfigError,
     DirectoryPath,
     EmailStr,
+    Field,
     FilePath,
     Json,
     NameEmail,
@@ -56,6 +58,7 @@ from pydantic import (
     confloat,
     conint,
     conlist,
+    conset,
     constr,
     create_model,
     errors,
@@ -200,6 +203,215 @@ def test_constrained_list_item_type_fails():
         {'loc': ('v', 1), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
         {'loc': ('v', 2), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
     ]
+
+
+def test_conlist():
+    class Model(BaseModel):
+        foo: List[int] = Field(..., min_items=2, max_items=4)
+        bar: conlist(str, min_items=1, max_items=4) = None
+
+    assert Model(foo=[1, 2], bar=['spoon']).dict() == {'foo': [1, 2], 'bar': ['spoon']}
+
+    with pytest.raises(ValidationError, match='ensure this value has at least 2 items'):
+        Model(foo=[1])
+
+    with pytest.raises(ValidationError, match='ensure this value has at most 4 items'):
+        Model(foo=list(range(5)))
+
+    assert Model.schema() == {
+        'title': 'Model',
+        'type': 'object',
+        'properties': {
+            'foo': {'title': 'Foo', 'type': 'array', 'items': {'type': 'integer'}, 'minItems': 2, 'maxItems': 4},
+            'bar': {'title': 'Bar', 'type': 'array', 'items': {'type': 'string'}, 'minItems': 1, 'maxItems': 4},
+        },
+        'required': ['foo'],
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=[1, 'x', 'y'])
+    assert exc_info.value.errors() == [
+        {'loc': ('foo', 1), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+        {'loc': ('foo', 2), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=1)
+    assert exc_info.value.errors() == [{'loc': ('foo',), 'msg': 'value is not a valid list', 'type': 'type_error.list'}]
+
+
+def test_conlist_wrong_type_default():
+    """It should not validate default value by default"""
+
+    class Model(BaseModel):
+        v: conlist(int) = 'a'
+
+    m = Model()
+    assert m.v == 'a'
+
+
+def test_constrained_set_good():
+    class Model(BaseModel):
+        v: conset(int) = []
+
+    m = Model(v=[1, 2, 3])
+    assert m.v == {1, 2, 3}
+
+
+def test_constrained_set_default():
+    class Model(BaseModel):
+        v: conset(int) = set()
+
+    m = Model()
+    assert m.v == set()
+
+
+def test_constrained_set_default_invalid():
+    class Model(BaseModel):
+        v: conset(int) = 'not valid, not validated'
+
+    m = Model()
+    assert m.v == 'not valid, not validated'
+
+
+def test_constrained_set_too_long():
+    class ConSetModelMax(BaseModel):
+        v: conset(int, max_items=10) = []
+
+    with pytest.raises(ValidationError) as exc_info:
+        ConSetModelMax(v=set(str(i) for i in range(11)))
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('v',),
+            'msg': 'ensure this value has at most 10 items',
+            'type': 'value_error.set.max_items',
+            'ctx': {'limit_value': 10},
+        }
+    ]
+
+
+def test_constrained_set_too_short():
+    class ConSetModelMin(BaseModel):
+        v: conset(int, min_items=1)
+
+    with pytest.raises(ValidationError) as exc_info:
+        ConSetModelMin(v=[])
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('v',),
+            'msg': 'ensure this value has at least 1 items',
+            'type': 'value_error.set.min_items',
+            'ctx': {'limit_value': 1},
+        }
+    ]
+
+
+def test_constrained_set_constraints():
+    class ConSetModelBoth(BaseModel):
+        v: conset(int, min_items=7, max_items=11)
+
+    m = ConSetModelBoth(v=set(range(7)))
+    assert m.v == set(range(7))
+
+    m = ConSetModelBoth(v=set(range(11)))
+    assert m.v == set(range(11))
+
+    with pytest.raises(ValidationError) as exc_info:
+        ConSetModelBoth(v=set(range(6)))
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('v',),
+            'msg': 'ensure this value has at least 7 items',
+            'type': 'value_error.set.min_items',
+            'ctx': {'limit_value': 7},
+        }
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        ConSetModelBoth(v=set(range(12)))
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('v',),
+            'msg': 'ensure this value has at most 11 items',
+            'type': 'value_error.set.max_items',
+            'ctx': {'limit_value': 11},
+        }
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        ConSetModelBoth(v=1)
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid set', 'type': 'type_error.set'}]
+
+
+def test_constrained_set_item_type_fails():
+    class ConSetModel(BaseModel):
+        v: conset(int) = []
+
+    with pytest.raises(ValidationError) as exc_info:
+        ConSetModel(v=['a', 'b', 'c'])
+    assert exc_info.value.errors() == [
+        {'loc': ('v', 0), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+        {'loc': ('v', 1), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+        {'loc': ('v', 2), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+    ]
+
+
+def test_conset():
+    class Model(BaseModel):
+        foo: Set[int] = Field(..., min_items=2, max_items=4)
+        bar: conset(str, min_items=1, max_items=4) = None
+
+    assert Model(foo=[1, 2], bar=['spoon']).dict() == {'foo': {1, 2}, 'bar': {'spoon'}}
+
+    assert Model(foo=[1, 1, 1, 2, 2], bar=['spoon']).dict() == {'foo': {1, 2}, 'bar': {'spoon'}}
+
+    with pytest.raises(ValidationError, match='ensure this value has at least 2 items'):
+        Model(foo=[1])
+
+    with pytest.raises(ValidationError, match='ensure this value has at most 4 items'):
+        Model(foo=list(range(5)))
+
+    assert Model.schema() == {
+        'title': 'Model',
+        'type': 'object',
+        'properties': {
+            'foo': {
+                'title': 'Foo',
+                'type': 'array',
+                'items': {'type': 'integer'},
+                'uniqueItems': True,
+                'minItems': 2,
+                'maxItems': 4,
+            },
+            'bar': {
+                'title': 'Bar',
+                'type': 'array',
+                'items': {'type': 'string'},
+                'uniqueItems': True,
+                'minItems': 1,
+                'maxItems': 4,
+            },
+        },
+        'required': ['foo'],
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=[1, 'x', 'y'])
+    errors = exc_info.value.errors()
+    assert len(errors) == 2
+    assert all(error['msg'] == 'value is not a valid integer' for error in errors)
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=1)
+    assert exc_info.value.errors() == [{'loc': ('foo',), 'msg': 'value is not a valid set', 'type': 'type_error.set'}]
+
+
+def test_conset_not_required():
+    class Model(BaseModel):
+        foo: Set[int] = None
+
+    assert Model(foo=None).foo is None
+    assert Model().foo is None
 
 
 class ConStringModel(BaseModel):
@@ -392,6 +604,7 @@ class BoolCastable:
         ('uuid_check', 'ebcdab58-6eb8-46fb-a190-d07a33e9eac8', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
         ('uuid_check', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8'), UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
         ('uuid_check', b'ebcdab58-6eb8-46fb-a190-d07a33e9eac8', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
+        ('uuid_check', b'\x12\x34\x56\x78' * 4, UUID('12345678-1234-5678-1234-567812345678')),
         ('uuid_check', 'ebcdab58-6eb8-46fb-a190-', ValidationError),
         ('uuid_check', 123, ValidationError),
         ('decimal_check', 42.24, Decimal('42.24')),
@@ -514,12 +727,37 @@ def test_int_enum_successful_for_str_int():
     assert repr(m.tool) == '<ToolEnum.wrench: 2>'
 
 
+def test_enum_type():
+    """it should validate any Enum"""
+
+    class Model(BaseModel):
+        my_enum: Enum
+
+    Model(my_enum=FruitEnum.banana)
+    Model(my_enum=ToolEnum.wrench)
+    with pytest.raises(ValidationError):
+        Model(my_enum='banana')
+
+
+def test_int_enum_type():
+    """it should validate any IntEnum"""
+
+    class Model(BaseModel):
+        my_int_enum: IntEnum
+
+    Model(my_int_enum=ToolEnum.wrench)
+    with pytest.raises(ValidationError):
+        Model(my_int_enum=FruitEnum.banana)
+    with pytest.raises(ValidationError):
+        Model(my_int_enum=2)
+
+
 @pytest.mark.skipif(not email_validator, reason='email_validator not installed')
 def test_string_success():
     class MoreStringsModel(BaseModel):
         str_strip_enabled: constr(strip_whitespace=True)
         str_strip_disabled: constr(strip_whitespace=False)
-        str_regex: constr(regex=r'^xxx\d{3}$') = ...
+        str_regex: constr(regex=r'^xxx\d{3}$') = ...  # noqa: F722
         str_min_length: constr(min_length=5) = ...
         str_curtailed: constr(curtail_length=5) = ...
         str_email: EmailStr = ...
@@ -548,7 +786,7 @@ def test_string_success():
 @pytest.mark.skipif(not email_validator, reason='email_validator not installed')
 def test_string_fails():
     class MoreStringsModel(BaseModel):
-        str_regex: constr(regex=r'^xxx\d{3}$') = ...
+        str_regex: constr(regex=r'^xxx\d{3}$') = ...  # noqa: F722
         str_min_length: constr(min_length=5) = ...
         str_curtailed: constr(curtail_length=5) = ...
         str_email: EmailStr = ...
@@ -615,6 +853,7 @@ def test_dict():
         ((1, 2, '3'), [1, 2, '3']),
         ({1, 2, '3'}, list({1, 2, '3'})),
         ((i ** 2 for i in range(5)), [0, 1, 4, 9, 16]),
+        ((deque((1, 2, 3)), list(deque((1, 2, 3))))),
     ),
 )
 def test_list_success(value, result):
@@ -654,6 +893,7 @@ def test_ordered_dict():
         ((1, 2, '3'), (1, 2, '3')),
         ({1, 2, '3'}, tuple({1, 2, '3'})),
         ((i ** 2 for i in range(5)), (0, 1, 4, 9, 16)),
+        (deque([1, 2, 3]), (1, 2, 3)),
     ),
 )
 def test_tuple_success(value, result):
@@ -761,6 +1001,7 @@ def test_set_type_fails():
     (
         (int, [1, 2, 3], [1, 2, 3]),
         (int, (1, 2, 3), (1, 2, 3)),
+        (int, deque((1, 2, 3)), deque((1, 2, 3))),
         (float, {1.0, 2.0, 3.0}, {1.0, 2.0, 3.0}),
         (Set[int], [{1, 2}, {3, 4}, {5, 6}], [{1, 2}, {3, 4}, {5, 6}]),
         (Tuple[int, str], ((1, 'a'), (2, 'b'), (3, 'c')), ((1, 'a'), (2, 'b'), (3, 'c'))),
@@ -1843,13 +2084,20 @@ def test_pattern():
     f2 = Foobar(pattern=p)
     assert f2.pattern is p
 
+    assert Foobar.schema() == {
+        'type': 'object',
+        'title': 'Foobar',
+        'properties': {'pattern': {'type': 'string', 'format': 'regex', 'title': 'Pattern'}},
+        'required': ['pattern'],
+    }
+
 
 def test_pattern_error():
     class Foobar(BaseModel):
         pattern: Pattern
 
     with pytest.raises(ValidationError) as exc_info:
-        Foobar(pattern=f'[xx')
+        Foobar(pattern='[xx')
     assert exc_info.value.errors() == [
         {'loc': ('pattern',), 'msg': 'Invalid regular expression', 'type': 'value_error.regex_pattern'}
     ]
@@ -1894,6 +2142,15 @@ def test_secretstr_equality():
     assert SecretStr('123') is not SecretStr('123')
 
 
+def test_secretstr_idempotent():
+    class Foobar(BaseModel):
+        password: SecretStr
+
+    # Should not raise an exception
+    m = Foobar(password=SecretStr('1234'))
+    assert m.password.get_secret_value() == '1234'
+
+
 def test_secretstr_error():
     class Foobar(BaseModel):
         password: SecretStr
@@ -1901,6 +2158,38 @@ def test_secretstr_error():
     with pytest.raises(ValidationError) as exc_info:
         Foobar(password=[6, 23, 'abc'])
     assert exc_info.value.errors() == [{'loc': ('password',), 'msg': 'str type expected', 'type': 'type_error.str'}]
+
+
+def test_secretstr_min_max_length():
+    class Foobar(BaseModel):
+        password: SecretStr = Field(min_length=6, max_length=10)
+
+    with pytest.raises(ValidationError) as exc_info:
+        Foobar(password='')
+
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('password',),
+            'msg': 'ensure this value has at least 6 characters',
+            'type': 'value_error.any_str.min_length',
+            'ctx': {'limit_value': 6},
+        }
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        Foobar(password='1' * 20)
+
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('password',),
+            'msg': 'ensure this value has at most 10 characters',
+            'type': 'value_error.any_str.max_length',
+            'ctx': {'limit_value': 10},
+        }
+    ]
+
+    value = '1' * 8
+    assert Foobar(password=value).password.get_secret_value() == value
 
 
 def test_secretbytes():
@@ -1942,6 +2231,14 @@ def test_secretbytes_equality():
     assert SecretBytes(b'123') is not SecretBytes(b'123')
 
 
+def test_secretbytes_idempotent():
+    class Foobar(BaseModel):
+        password: SecretBytes
+
+    # Should not raise an exception.
+    _ = Foobar(password=SecretBytes(b'1234'))
+
+
 def test_secretbytes_error():
     class Foobar(BaseModel):
         password: SecretBytes
@@ -1949,6 +2246,63 @@ def test_secretbytes_error():
     with pytest.raises(ValidationError) as exc_info:
         Foobar(password=[6, 23, 'abc'])
     assert exc_info.value.errors() == [{'loc': ('password',), 'msg': 'byte type expected', 'type': 'type_error.bytes'}]
+
+
+def test_secretbytes_min_max_length():
+    class Foobar(BaseModel):
+        password: SecretBytes = Field(min_length=6, max_length=10)
+
+    with pytest.raises(ValidationError) as exc_info:
+        Foobar(password=b'')
+
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('password',),
+            'msg': 'ensure this value has at least 6 characters',
+            'type': 'value_error.any_str.min_length',
+            'ctx': {'limit_value': 6},
+        }
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        Foobar(password=b'1' * 20)
+
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('password',),
+            'msg': 'ensure this value has at most 10 characters',
+            'type': 'value_error.any_str.max_length',
+            'ctx': {'limit_value': 10},
+        }
+    ]
+
+    value = b'1' * 8
+    assert Foobar(password=value).password.get_secret_value() == value
+
+
+@pytest.mark.parametrize('secret_cls', [SecretStr, SecretBytes])
+@pytest.mark.parametrize(
+    'field_kw,schema_kw',
+    [
+        [{}, {}],
+        [{'min_length': 6}, {'minLength': 6}],
+        [{'max_length': 10}, {'maxLength': 10}],
+        [{'min_length': 6, 'max_length': 10}, {'minLength': 6, 'maxLength': 10}],
+    ],
+    ids=['no-constrains', 'min-constraint', 'max-constraint', 'min-max-constraints'],
+)
+def test_secrets_schema(secret_cls, field_kw, schema_kw):
+    class Foobar(BaseModel):
+        password: secret_cls = Field(**field_kw)
+
+    assert Foobar.schema() == {
+        'title': 'Foobar',
+        'type': 'object',
+        'properties': {
+            'password': {'title': 'Password', 'type': 'string', 'writeOnly': True, 'format': 'password', **schema_kw}
+        },
+        'required': ['password'],
+    }
 
 
 def test_generic_without_params():
@@ -2027,15 +2381,22 @@ def test_frozenset_field():
     assert object_under_test.set == test_set
 
 
-def test_frozenset_field_conversion():
+@pytest.mark.parametrize(
+    'value,result',
+    [
+        ([1, 2, 3], frozenset([1, 2, 3])),
+        ({1, 2, 3}, frozenset([1, 2, 3])),
+        ((1, 2, 3), frozenset([1, 2, 3])),
+        (deque([1, 2, 3]), frozenset([1, 2, 3])),
+    ],
+)
+def test_frozenset_field_conversion(value, result):
     class FrozenSetModel(BaseModel):
         set: FrozenSet[int]
 
-    test_list = [1, 2, 3]
-    test_set = frozenset(test_list)
-    object_under_test = FrozenSetModel(set=test_list)
+    object_under_test = FrozenSetModel(set=value)
 
-    assert object_under_test.set == test_set
+    assert object_under_test.set == result
 
 
 def test_frozenset_field_not_convertible():
@@ -2100,3 +2461,82 @@ def test_bytesize_raises():
     m = Model(size='1MB')
     with pytest.raises(errors.InvalidByteSizeUnit, match='byte unit'):
         m.size.to('bad_unit')
+
+
+def test_deque_success():
+    class Model(BaseModel):
+        v: deque
+
+    assert Model(v=[1, 2, 3]).v == deque([1, 2, 3])
+
+
+@pytest.mark.parametrize(
+    'cls,value,result',
+    (
+        (int, [1, 2, 3], deque([1, 2, 3])),
+        (int, (1, 2, 3), deque((1, 2, 3))),
+        (int, deque((1, 2, 3)), deque((1, 2, 3))),
+        (float, {1.0, 2.0, 3.0}, deque({1.0, 2.0, 3.0})),
+        (Set[int], [{1, 2}, {3, 4}, {5, 6}], deque([{1, 2}, {3, 4}, {5, 6}])),
+        (Tuple[int, str], ((1, 'a'), (2, 'b'), (3, 'c')), deque(((1, 'a'), (2, 'b'), (3, 'c')))),
+        (str, [w for w in 'one two three'.split()], deque(['one', 'two', 'three'])),
+        (int, frozenset([1, 2, 3]), deque([1, 2, 3])),
+    ),
+)
+def test_deque_generic_success(cls, value, result):
+    class Model(BaseModel):
+        v: Deque[cls]
+
+    assert Model(v=value).v == result
+
+
+@pytest.mark.parametrize(
+    'cls,value,errors',
+    (
+        (int, [1, 'a', 3], [{'loc': ('v', 1), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}]),
+        (int, (1, 2, 'a'), [{'loc': ('v', 2), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}]),
+        (float, range(10), [{'loc': ('v',), 'msg': 'value is not a valid sequence', 'type': 'type_error.sequence'}]),
+        (float, ('a', 2.2, 3.3), [{'loc': ('v', 0), 'msg': 'value is not a valid float', 'type': 'type_error.float'}]),
+        (float, (1.1, 2.2, 'a'), [{'loc': ('v', 2), 'msg': 'value is not a valid float', 'type': 'type_error.float'}]),
+        (
+            Set[int],
+            [{1, 2}, {2, 3}, {'d'}],
+            [{'loc': ('v', 2, 0), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}],
+        ),
+        (
+            Tuple[int, str],
+            ((1, 'a'), ('a', 'a'), (3, 'c')),
+            [{'loc': ('v', 1, 0), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}],
+        ),
+        (
+            List[int],
+            [{'a': 1, 'b': 2}, [1, 2], [2, 3]],
+            [{'loc': ('v', 0), 'msg': 'value is not a valid list', 'type': 'type_error.list'}],
+        ),
+    ),
+)
+def test_deque_fails(cls, value, errors):
+    class Model(BaseModel):
+        v: Deque[cls]
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(v=value)
+    assert exc_info.value.errors() == errors
+
+
+def test_deque_model():
+    class Model2(BaseModel):
+        x: int
+
+    class Model(BaseModel):
+        v: Deque[Model2]
+
+    seq = [Model2(x=1), Model2(x=2)]
+    assert Model(v=seq).v == deque(seq)
+
+
+def test_deque_json():
+    class Model(BaseModel):
+        v: Deque[int]
+
+    assert Model(v=deque((1, 2, 3))).json() == '{"v": [1, 2, 3]}'

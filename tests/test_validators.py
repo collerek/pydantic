@@ -1,11 +1,13 @@
+from collections import deque
 from datetime import datetime
 from itertools import product
 from typing import Dict, List, Optional, Tuple
 
 import pytest
 
-from pydantic import BaseModel, ConfigError, Extra, ValidationError, errors, validator
+from pydantic import BaseModel, ConfigError, Extra, Field, ValidationError, errors, validator
 from pydantic.class_validators import make_generic_validator, root_validator
+from pydantic.typing import Literal
 
 
 def test_simple():
@@ -53,6 +55,19 @@ def test_frozenset_validation():
     assert Model(a=frozenset({1, 2, 3})).a == frozenset({1, 2, 3})
     assert Model(a=[4, 5]).a == frozenset({4, 5})
     assert Model(a=(6,)).a == frozenset({6})
+
+
+def test_deque_validation():
+    class Model(BaseModel):
+        a: deque
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(a='snap')
+    assert exc_info.value.errors() == [{'loc': ('a',), 'msg': 'value is not a valid deque', 'type': 'type_error.deque'}]
+    assert Model(a={1, 2, 3}).a == deque([1, 2, 3])
+    assert Model(a=deque({1, 2, 3})).a == deque([1, 2, 3])
+    assert Model(a=[4, 5]).a == deque([4, 5])
+    assert Model(a=(6,)).a == deque([6])
 
 
 def test_validate_whole():
@@ -184,6 +199,30 @@ def test_validating_assignment_dict():
     ]
 
 
+def test_validating_assignment_values_dict():
+    class ModelOne(BaseModel):
+        a: int
+
+    class ModelTwo(BaseModel):
+        m: ModelOne
+        b: int
+
+        @validator('b')
+        def validate_b(cls, b, values):
+            if 'm' in values:
+                return b + values['m'].a  # this fails if values['m'] is a dict
+            else:
+                return b
+
+        class Config:
+            validate_assignment = True
+
+    model = ModelTwo(m=ModelOne(a=1), b=2)
+    assert model.b == 3
+    model.b = 3
+    assert model.b == 4
+
+
 def test_validate_multiple():
     # also test TypeError
     class Model(BaseModel):
@@ -274,6 +313,25 @@ def test_validate_always():
     class Model(BaseModel):
         a: str = None
 
+        @validator('a', pre=True, always=True)
+        def check_a(cls, v):
+            nonlocal check_calls
+            check_calls += 1
+            return v or 'xxx'
+
+    assert Model().a == 'xxx'
+    assert check_calls == 1
+    assert Model(a='y').a == 'y'
+    assert check_calls == 2
+
+
+def test_validate_always_on_inheritance():
+    check_calls = 0
+
+    class ParentModel(BaseModel):
+        a: str = None
+
+    class Model(ParentModel):
         @validator('a', pre=True, always=True)
         def check_a(cls, v):
             nonlocal check_calls
@@ -713,7 +771,7 @@ def test_assert_raises_validation_error():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='snap')
-    injected_by_pytest = "\nassert 'snap' == 'a'\n  - snap\n  + a"
+    injected_by_pytest = "\nassert 'snap' == 'a'\n  - a\n  + snap"
     assert exc_info.value.errors() == [
         {'loc': ('a',), 'msg': f'invalid a{injected_by_pytest}', 'type': 'assertion_error'}
     ]
@@ -736,6 +794,7 @@ def test_root_validator():
     class Model(BaseModel):
         a: int = 1
         b: str
+        c: str
 
         @validator('b')
         def repeat_b(cls, v):
@@ -748,19 +807,36 @@ def test_root_validator():
                 raise ValueError('foobar')
             return dict(values, b='changed')
 
-    assert Model(a='123', b='bar').dict() == {'a': 123, 'b': 'changed'}
+        @root_validator
+        def example_root_validator2(cls, values):
+            root_val_values.append(values)
+            if 'snap' in values.get('c', ''):
+                raise ValueError('foobar2')
+            return dict(values, c='changed')
+
+    assert Model(a='123', b='bar', c='baz').dict() == {'a': 123, 'b': 'changed', 'c': 'changed'}
 
     with pytest.raises(ValidationError) as exc_info:
-        Model(b='snap dragon')
-    assert exc_info.value.errors() == [{'loc': ('__root__',), 'msg': 'foobar', 'type': 'value_error'}]
+        Model(b='snap dragon', c='snap dragon2')
+    assert exc_info.value.errors() == [
+        {'loc': ('__root__',), 'msg': 'foobar', 'type': 'value_error'},
+        {'loc': ('__root__',), 'msg': 'foobar2', 'type': 'value_error'},
+    ]
 
     with pytest.raises(ValidationError) as exc_info:
-        Model(a='broken', b='bar')
+        Model(a='broken', b='bar', c='baz')
     assert exc_info.value.errors() == [
         {'loc': ('a',), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}
     ]
 
-    assert root_val_values == [{'a': 123, 'b': 'barbar'}, {'a': 1, 'b': 'snap dragonsnap dragon'}, {'b': 'barbar'}]
+    assert root_val_values == [
+        {'a': 123, 'b': 'barbar', 'c': 'baz'},
+        {'a': 123, 'b': 'changed', 'c': 'baz'},
+        {'a': 1, 'b': 'snap dragonsnap dragon', 'c': 'snap dragon2'},
+        {'a': 1, 'b': 'snap dragonsnap dragon', 'c': 'snap dragon2'},
+        {'b': 'barbar', 'c': 'baz'},
+        {'b': 'changed', 'c': 'baz'},
+    ]
 
 
 def test_root_validator_pre():
@@ -1038,3 +1114,100 @@ def test_assignment_validator_cls():
     m = Model(name='hello')
     m.name = 'goodbye'
     assert validator_calls == 2
+
+
+@pytest.mark.skipif(not Literal, reason='typing_extensions not installed')
+def test_literal_validator():
+    class Model(BaseModel):
+        a: Literal['foo']
+
+    Model(a='foo')
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(a='nope')
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('a',),
+            'msg': "unexpected value; permitted: 'foo'",
+            'type': 'value_error.const',
+            'ctx': {'given': 'nope', 'permitted': ('foo',)},
+        }
+    ]
+
+
+@pytest.mark.skipif(not Literal, reason='typing_extensions not installed')
+def test_nested_literal_validator():
+    L1 = Literal['foo']
+    L2 = Literal['bar']
+
+    class Model(BaseModel):
+        a: Literal[L1, L2]
+
+    Model(a='foo')
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(a='nope')
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('a',),
+            'msg': "unexpected value; permitted: 'foo', 'bar'",
+            'type': 'value_error.const',
+            'ctx': {'given': 'nope', 'permitted': ('foo', 'bar')},
+        }
+    ]
+
+
+def test_field_that_is_being_validated_is_excluded_from_validator_values(mocker):
+    check_values = mocker.MagicMock()
+
+    class Model(BaseModel):
+        foo: str
+        bar: str = Field(alias='pika')
+        baz: str
+
+        class Config:
+            validate_assignment = True
+
+        @validator('foo')
+        def validate_foo(cls, v, values):
+            check_values({**values})
+            return v
+
+        @validator('bar')
+        def validate_bar(cls, v, values):
+            check_values({**values})
+            return v
+
+    model = Model(foo='foo_value', pika='bar_value', baz='baz_value')
+    check_values.reset_mock()
+
+    assert list(dict(model).items()) == [('foo', 'foo_value'), ('bar', 'bar_value'), ('baz', 'baz_value')]
+
+    model.foo = 'new_foo_value'
+    check_values.assert_called_once_with({'bar': 'bar_value', 'baz': 'baz_value'})
+    check_values.reset_mock()
+
+    model.bar = 'new_bar_value'
+    check_values.assert_called_once_with({'foo': 'new_foo_value', 'baz': 'baz_value'})
+
+    # ensure field order is the same
+    assert list(dict(model).items()) == [('foo', 'new_foo_value'), ('bar', 'new_bar_value'), ('baz', 'baz_value')]
+
+
+def test_exceptions_in_field_validators_restore_original_field_value():
+    class Model(BaseModel):
+        foo: str
+
+        class Config:
+            validate_assignment = True
+
+        @validator('foo')
+        def validate_foo(cls, v):
+            if v == 'raise_exception':
+                raise RuntimeError('test error')
+            return v
+
+    model = Model(foo='foo')
+    with pytest.raises(RuntimeError, match='test error'):
+        model.foo = 'raise_exception'
+    assert model.foo == 'foo'

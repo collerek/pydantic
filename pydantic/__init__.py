@@ -5,7 +5,7 @@ from .decorator import validate_arguments
 from .env_settings import BaseSettings
 from .error_wrappers import ValidationError
 from .errors import *
-from .fields import Field, Required, Schema
+from .fields import Field, PrivateAttr, Required, Schema
 from .main import *
 from .networks import *
 from .parse import Protocol
@@ -56,6 +56,7 @@ __all__ = [
     # tools
     'parse_file_as',
     'parse_obj_as',
+    'parse_raw_as',
     # types
     'NoneStr',
     'NoneBytes',
@@ -66,6 +67,8 @@ __all__ = [
     'conbytes',
     'ConstrainedList',
     'conlist',
+    'ConstrainedSet',
+    'conset',
     'ConstrainedStr',
     'constr',
     'PyObject',
@@ -93,6 +96,7 @@ __all__ = [
     'StrictInt',
     'StrictFloat',
     'PaymentCardNumber',
+    'PrivateAttr',
     'ByteSize',
     # version
     'VERSION',

@@ -31,11 +31,11 @@ with custom properties and validation.
   and `int`, `float`, and `Decimal` are coerced using `str(v).encode()`
 
 `list`
-: allows `list`, `tuple`, `set`, `frozenset`, or generators and casts to a list;
+: allows `list`, `tuple`, `set`, `frozenset`, `deque`, or generators and casts to a list;
   see `typing.List` below for sub-type constraints
 
 `tuple`
-: allows `list`, `tuple`, `set`, `frozenset`, or generators and casts to a tuple;
+: allows `list`, `tuple`, `set`, `frozenset`, `deque`, or generators and casts to a tuple;
   see `typing.Tuple` below for sub-type constraints
 
 `dict`
@@ -43,12 +43,16 @@ with custom properties and validation.
   see `typing.Dict` below for sub-type constraints
 
 `set`
-: allows `list`, `tuple`, `set`, `frozenset`, or generators and casts to a set;
+: allows `list`, `tuple`, `set`, `frozenset`, `deque`, or generators and casts to a set;
   see `typing.Set` below for sub-type constraints
 
 `frozenset`
-: allows `list`, `tuple`, `set`, `frozenset`, or generators and casts to a frozen set;
+: allows `list`, `tuple`, `set`, `frozenset`, `deque`, or generators and casts to a frozen set;
   see `typing.FrozenSet` below for sub-type constraints
+
+`deque`
+: allows `list`, `tuple`, `set`, `frozenset`, `deque`, or generators and casts to a deque;
+  see `typing.Deque` below for sub-type constraints
 
 `datetime.date`
 : see [Datetime Types](#datetime-types) below for more detail on parsing and validation
@@ -88,6 +92,9 @@ with custom properties and validation.
 : see [Typing Iterables](#typing-iterables) below for more detail on parsing and validation
 
 `typing.FrozenSet`
+: see [Typing Iterables](#typing-iterables) below for more detail on parsing and validation
+
+`typing.Deque`
 : see [Typing Iterables](#typing-iterables) below for more detail on parsing and validation
 
 `typing.Sequence`
@@ -130,10 +137,16 @@ with custom properties and validation.
   see [Pydantic Types](#pydantic-types) for other custom IP address types
 
 `enum.Enum`
+: checks that the value is a valid Enum instance
+
+`subclass of enum.Enum`
 : checks that the value is a valid member of the enum;
   see [Enums and Choices](#enums-and-choices) for more details
 
 `enum.IntEnum`
+: checks that the value is a valid IntEnum instance
+
+`subclass of enum.IntEnum`
 : checks that the value is a valid member of the integer enum;
   see [Enums and Choices](#enums-and-choices) for more details
 
@@ -145,7 +158,7 @@ with custom properties and validation.
   see [Pydantic Types](#pydantic-types) for other more strict path types
 
 `uuid.UUID`
-: strings and bytes (converted to strings) are passed to `UUID(v)`;
+: strings and bytes (converted to strings) are passed to `UUID(v)`, with a fallback to `UUID(bytes=v)` for `bytes` and `bytearray`;
   see [Pydantic Types](#pydantic-types) for other stricter UUID types
 
 `ByteSize`
@@ -248,10 +261,10 @@ types:
 * `datetime` fields can be:
 
     * `datetime`, existing `datetime` object
-    * `int` or `float`, assumed as Unix time, i.e. seconds (if <= `2e10`) or milliseconds (if > `2e10`) since 1 January 1970
+    * `int` or `float`, assumed as Unix time, i.e. seconds (if >= `-2e10` or <= `2e10`) or milliseconds (if < `-2e10`or > `2e10`) since 1 January 1970
     * `str`, following formats work:
 
-        * `YYYY-MM-DD[T]HH:MM[:SS[.ffffff]][Z[±]HH[:]MM]]]`
+        * `YYYY-MM-DD[T]HH:MM[:SS[.ffffff]][Z or [±]HH[:]MM]]]`
         * `int` or `float` as a string (assumed as Unix time)
 
 * `date` fields can be:
@@ -268,7 +281,7 @@ types:
     * `time`, existing `time` object
     * `str`, following formats work:
 
-        * `HH:MM[:SS[.ffffff]]`
+        * `HH:MM[:SS[.ffffff]][Z or [±]HH[:]MM]]]`
 
 * `timedelta` fields can be:
 
@@ -497,6 +510,10 @@ _(This script is complete, it should run "as is")_
 : type method for constraining lists;
   see [Constrained Types](#constrained-types)
 
+`conset`
+: type method for constraining sets;
+  see [Constrained Types](#constrained-types)
+
 `constr`
 : type method for constraining strs;
   see [Constrained Types](#constrained-types)
@@ -508,8 +525,9 @@ For URI/URL validation the following types are available:
 - `AnyUrl`: any scheme allowed, TLD not required
 - `AnyHttpUrl`: schema `http` or `https`, TLD not required
 - `HttpUrl`: schema `http` or `https`, TLD required, max length 2083
-- `PostgresDsn`: schema `postgres` or `postgresql`, userinfo required, TLD not required
-- `RedisDsn`: schema `redis`, userinfo required, tld not required
+- `PostgresDsn`: schema `postgres` or `postgresql`, user info required, TLD not required
+- `RedisDsn`: schema `redis`, user info not required, tld not required (CHANGED: user info not required from
+  **v1.6** onwards)
 - `stricturl`, method with the following keyword arguments:
     - `strip_whitespace: bool = True`
     - `min_length: int = 1`
@@ -647,6 +665,7 @@ The `__str__` method for `Color` returns `self.as_named(fallback=True)`.
 
 You can use the `SecretStr` and the `SecretBytes` data types for storing sensitive information
 that you do not want to be visible in logging or tracebacks.
+`SecretStr` and `SecretBytes` can be initialized idempotently or by using `str` or `bytes` literals respectively.
 The `SecretStr` and `SecretBytes` will be formatted as either `'**********'` or `''` on conversion to json.
 
 ```py

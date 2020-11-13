@@ -1,18 +1,41 @@
 import os
 import re
 import string
+import sys
+from copy import copy, deepcopy
 from distutils.version import StrictVersion
 from enum import Enum
-from typing import NewType, Union
+from typing import Callable, Dict, List, NewType, Tuple, TypeVar, Union
 
 import pytest
 
-from pydantic import VERSION, BaseModel
+from pydantic import VERSION, BaseModel, ConstrainedList, conlist
 from pydantic.color import Color
 from pydantic.dataclasses import dataclass
 from pydantic.fields import Undefined
-from pydantic.typing import display_as_type, is_new_type, new_type_supertype
-from pydantic.utils import ValueItems, deep_update, get_model, import_string, lenient_issubclass, truncate
+from pydantic.typing import (
+    ForwardRef,
+    Literal,
+    all_literal_values,
+    display_as_type,
+    get_args,
+    is_new_type,
+    new_type_supertype,
+    resolve_annotations,
+)
+from pydantic.utils import (
+    BUILTIN_COLLECTIONS,
+    ClassAttribute,
+    ValueItems,
+    deep_update,
+    get_model,
+    import_string,
+    lenient_issubclass,
+    path_type,
+    smart_deepcopy,
+    truncate,
+    unique_list,
+)
 from pydantic.version import version_info
 
 try:
@@ -91,6 +114,19 @@ def test_lenient_issubclass_is_lenient():
 def test_truncate(input_value, output):
     with pytest.warns(DeprecationWarning, match='`truncate` is no-longer used by pydantic and is deprecated'):
         assert truncate(input_value, max_len=20) == output
+
+
+@pytest.mark.parametrize(
+    'input_value,output',
+    [
+        ([], []),
+        ([1, 1, 1, 2, 1, 2, 3, 2, 3, 1, 4, 2, 3, 1], [1, 2, 3, 4]),
+        (['a', 'a', 'b', 'a', 'b', 'c', 'b', 'c', 'a'], ['a', 'b', 'c']),
+    ],
+)
+def test_unique_list(input_value, output):
+    assert unique_list(input_value) == output
+    assert unique_list(unique_list(input_value)) == unique_list(input_value)
 
 
 def test_value_items():
@@ -271,6 +307,11 @@ def test_undefined_repr():
     assert repr(Undefined) == 'PydanticUndefined'
 
 
+def test_undefined_copy():
+    copy(Undefined) is Undefined
+    deepcopy(Undefined) is Undefined
+
+
 def test_get_model():
     class A(BaseModel):
         a: str
@@ -298,3 +339,110 @@ def test_version_info():
 
 def test_version_strict():
     assert str(StrictVersion(VERSION)) == VERSION
+
+
+def test_class_attribute():
+    class Foo:
+        attr = ClassAttribute('attr', 'foo')
+
+    assert Foo.attr == 'foo'
+
+    with pytest.raises(AttributeError, match="'attr' attribute of 'Foo' is class-only"):
+        Foo().attr
+
+    f = Foo()
+    f.attr = 'not foo'
+    assert f.attr == 'not foo'
+
+
+@pytest.mark.skipif(not Literal, reason='typing_extensions not installed')
+def test_all_literal_values():
+    L1 = Literal['1']
+    assert all_literal_values(L1) == ('1',)
+
+    L2 = Literal['2']
+    L12 = Literal[L1, L2]
+    assert sorted(all_literal_values(L12)) == sorted(('1', '2'))
+
+    L312 = Literal['3', Literal[L1, L2]]
+    assert sorted(all_literal_values(L312)) == sorted(('1', '2', '3'))
+
+
+def test_path_type(tmp_path):
+    assert path_type(tmp_path) == 'directory'
+    file = tmp_path / 'foobar.txt'
+    file.write_text('hello')
+    assert path_type(file) == 'file'
+
+
+def test_path_type_unknown(tmp_path):
+    p = type(
+        'FakePath',
+        (),
+        {
+            'exists': lambda: True,
+            'is_dir': lambda: False,
+            'is_file': lambda: False,
+            'is_mount': lambda: False,
+            'is_symlink': lambda: False,
+            'is_block_device': lambda: False,
+            'is_char_device': lambda: False,
+            'is_fifo': lambda: False,
+            'is_socket': lambda: False,
+        },
+    )
+    assert path_type(p) == 'unknown'
+
+
+@pytest.mark.parametrize(
+    'obj',
+    (1, 1.0, '1', b'1', int, None, test_all_literal_values, len, test_all_literal_values.__code__, lambda: ..., ...),
+)
+def test_smart_deepcopy_immutable_non_sequence(obj, mocker):
+    # make sure deepcopy is not used
+    # (other option will be to use obj.copy(), but this will produce error as none of given objects have this method)
+    mocker.patch('pydantic.utils.deepcopy', side_effect=RuntimeError)
+    assert smart_deepcopy(obj) is deepcopy(obj) is obj
+
+
+@pytest.mark.parametrize('empty_collection', (collection() for collection in BUILTIN_COLLECTIONS))
+def test_smart_deepcopy_empty_collection(empty_collection, mocker):
+    mocker.patch('pydantic.utils.deepcopy', side_effect=RuntimeError)  # make sure deepcopy is not used
+    if not isinstance(empty_collection, (tuple, frozenset)):  # empty tuple or frozenset are always the same object
+        assert smart_deepcopy(empty_collection) is not empty_collection
+
+
+@pytest.mark.parametrize(
+    'collection', (c.fromkeys((1,)) if issubclass(c, dict) else c((1,)) for c in BUILTIN_COLLECTIONS)
+)
+def test_smart_deepcopy_collection(collection, mocker):
+    expected_value = object()
+    mocker.patch('pydantic.utils.deepcopy', return_value=expected_value)
+    assert smart_deepcopy(collection) is expected_value
+
+
+T = TypeVar('T')
+
+
+@pytest.mark.skipif(sys.version_info < (3, 8), reason='get_args is only consistent for python >= 3.8')
+@pytest.mark.parametrize(
+    'input_value,output_value',
+    [
+        (conlist(str), (str,)),
+        (ConstrainedList, ()),
+        (List[str], (str,)),
+        (Dict[str, int], (str, int)),
+        (int, ()),
+        (Union[int, Union[T, int], str][int], (int, str)),
+        (Union[int, Tuple[T, int]][str], (int, Tuple[str, int])),
+        (Callable[[], T][int], ([], int)),
+    ],
+)
+def test_get_args(input_value, output_value):
+    assert get_args(input_value) == output_value
+
+
+def test_resolve_annotations_no_module():
+    # TODO: is there a better test for this, can this case really happen?
+    fr = ForwardRef('Foo')
+    assert resolve_annotations({'Foo': ForwardRef('Foo')}, None) == {'Foo': fr}

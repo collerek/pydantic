@@ -14,43 +14,76 @@ from typing import (
     Callable,
     Dict,
     List,
+    Mapping,
     Optional,
+    Set,
     Tuple,
     Type,
     TypeVar,
     Union,
     cast,
     no_type_check,
+    overload,
 )
 
-from .class_validators import ROOT_KEY, ValidatorGroup, extract_root_validators, extract_validators, inherit_validators
+from .class_validators import ValidatorGroup, extract_root_validators, extract_validators, inherit_validators
 from .error_wrappers import ErrorWrapper, ValidationError
 from .errors import ConfigError, DictError, ExtraError, MissingError
-from .fields import SHAPE_MAPPING, ModelField, Undefined
+from .fields import SHAPE_MAPPING, ModelField, ModelPrivateAttr, PrivateAttr, Undefined
 from .json import custom_pydantic_encoder, pydantic_encoder
 from .parse import Protocol, load_file, load_str_bytes
-from .schema import model_schema
+from .schema import default_ref_template, model_schema
 from .types import PyObject, StrBytes
-from .typing import AnyCallable, AnyType, ForwardRef, is_classvar, resolve_annotations, update_field_forward_refs
+from .typing import AnyCallable, ForwardRef, get_origin, is_classvar, resolve_annotations, update_field_forward_refs
 from .utils import (
+    ROOT_KEY,
+    ClassAttribute,
     GetterDict,
     Representation,
     ValueItems,
     generate_model_signature,
+    is_valid_field,
+    is_valid_private_name,
     lenient_issubclass,
     sequence_like,
+    smart_deepcopy,
+    unique_list,
     validate_field_name,
 )
 
 if TYPE_CHECKING:
     from inspect import Signature
+
+    import typing_extensions
+
     from .class_validators import ValidatorListDict
     from .types import ModelOrDc
-    from .typing import CallableGenerator, TupleGenerator, DictStrAny, DictAny, SetStr
-    from .typing import AbstractSetIntStr, DictIntStrAny, ReprArgs  # noqa: F401
+    from .typing import (  # noqa: F401
+        AbstractSetIntStr,
+        CallableGenerator,
+        DictAny,
+        DictStrAny,
+        MappingIntStrAny,
+        ReprArgs,
+        SetStr,
+        TupleGenerator,
+    )
 
     ConfigType = Type['BaseConfig']
     Model = TypeVar('Model', bound='BaseModel')
+
+    class SchemaExtraCallable(typing_extensions.Protocol):
+        @overload
+        def __call__(self, schema: Dict[str, Any]) -> None:
+            pass
+
+        @overload  # noqa: F811
+        def __call__(self, schema: Dict[str, Any], model_class: Type['Model']) -> None:  # noqa: F811
+            pass
+
+
+else:
+    SchemaExtraCallable = Callable[..., None]
 
 try:
     import cython  # type: ignore
@@ -89,10 +122,11 @@ class BaseConfig:
     getter_dict: Type[GetterDict] = GetterDict
     alias_generator: Optional[Callable[[str], str]] = None
     keep_untouched: Tuple[type, ...] = ()
-    schema_extra: Union[Dict[str, Any], Callable[[Dict[str, Any]], None]] = {}
+    schema_extra: Union[Dict[str, Any], 'SchemaExtraCallable'] = {}
     json_loads: Callable[[str], Any] = json.loads
     json_dumps: Callable[..., str] = json.dumps
-    json_encoders: Dict[AnyType, AnyCallable] = {}
+    json_encoders: Dict[Type[Any], AnyCallable] = {}
+    underscore_attrs_are_private: bool = False
 
     @classmethod
     def get_field_info(cls, name: str) -> Dict[str, Any]:
@@ -159,18 +193,18 @@ def prepare_config(config: Type[BaseConfig], cls_name: str) -> None:
         config.case_sensitive = not config.case_insensitive  # type: ignore
 
 
-def is_valid_field(name: str) -> bool:
-    if not name.startswith('_'):
-        return True
-    return ROOT_KEY == name
-
-
 def validate_custom_root_type(fields: Dict[str, ModelField]) -> None:
     if len(fields) > 1:
         raise ValueError('__root__ cannot be mixed with other fields')
 
 
 UNTOUCHED_TYPES = FunctionType, property, type, classmethod, staticmethod
+
+# Note `ModelMetaclass` refers to `BaseModel`, but is also used to *create* `BaseModel`, so we need to add this extra
+# (somewhat hacky) boolean to keep track of whether we've created the `BaseModel` class yet, and therefore whether it's
+# safe to refer to it. If it *hasn't* been created, we assume that the `__new__` call we're in the middle of is for
+# the `BaseModel` class, since that's defined immediately after the metaclass.
+_is_base_model_class_defined = False
 
 
 class ModelMetaclass(ABCMeta):
@@ -179,25 +213,26 @@ class ModelMetaclass(ABCMeta):
         fields: Dict[str, ModelField] = {}
         config = BaseConfig
         validators: 'ValidatorListDict' = {}
-        fields_defaults: Dict[str, Any] = {}
 
         pre_root_validators, post_root_validators = [], []
+        private_attributes: Dict[str, ModelPrivateAttr] = {}
+        slots: Set[str] = namespace.get('__slots__', ())
+        slots = {slots} if isinstance(slots, str) else set(slots)
+
         for base in reversed(bases):
-            if issubclass(base, BaseModel) and base != BaseModel:
-                fields.update(deepcopy(base.__fields__))
+            if _is_base_model_class_defined and issubclass(base, BaseModel) and base != BaseModel:
+                fields.update(smart_deepcopy(base.__fields__))
                 config = inherit_config(base.__config__, config)
                 validators = inherit_validators(base.__validators__, validators)
                 pre_root_validators += base.__pre_root_validators__
                 post_root_validators += base.__post_root_validators__
+                private_attributes.update(base.__private_attributes__)
 
         config = inherit_config(namespace.get('Config'), config)
         validators = inherit_validators(extract_validators(namespace), validators)
         vg = ValidatorGroup(validators)
 
         for f in fields.values():
-            if not f.required:
-                fields_defaults[f.name] = f.default
-
             f.set_config(config)
             extra_validators = vg.get_validators(f.name)
             if extra_validators:
@@ -221,7 +256,7 @@ class ModelMetaclass(ABCMeta):
                     if (
                         isinstance(value, untouched_types)
                         and ann_type != PyObject
-                        and not lenient_issubclass(getattr(ann_type, '__origin__', None), Type)
+                        and not lenient_issubclass(get_origin(ann_type), Type)
                     ):
                         continue
                     fields[ann_name] = inferred = ModelField.infer(
@@ -231,16 +266,21 @@ class ModelMetaclass(ABCMeta):
                         class_validators=vg.get_validators(ann_name),
                         config=config,
                     )
-                    if not inferred.required:
-                        fields_defaults[ann_name] = inferred.default
+                elif ann_name not in namespace and config.underscore_attrs_are_private:
+                    private_attributes[ann_name] = PrivateAttr()
 
             for var_name, value in namespace.items():
-                if (
-                    var_name not in annotations
-                    and is_valid_field(var_name)
-                    and not isinstance(value, untouched_types)
-                    and var_name not in class_vars
-                ):
+                can_be_changed = var_name not in class_vars and not isinstance(value, untouched_types)
+                if isinstance(value, ModelPrivateAttr):
+                    if not is_valid_private_name(var_name):
+                        raise NameError(
+                            f'Private attributes "{var_name}" must not be a valid field name; '
+                            f'Use sunder or dunder names, e. g. "_{var_name}" or "__{var_name}__"'
+                        )
+                    private_attributes[var_name] = value
+                elif config.underscore_attrs_are_private and is_valid_private_name(var_name) and can_be_changed:
+                    private_attributes[var_name] = PrivateAttr(default=value)
+                elif is_valid_field(var_name) and var_name not in annotations and can_be_changed:
                     validate_field_name(bases, var_name)
                     inferred = ModelField.infer(
                         name=var_name,
@@ -255,8 +295,6 @@ class ModelMetaclass(ABCMeta):
                             f'if you wish to change the type of this field, please use a type annotation'
                         )
                     fields[var_name] = inferred
-                    if not inferred.required:
-                        fields_defaults[var_name] = inferred.default
 
         _custom_root_type = ROOT_KEY in fields
         if _custom_root_type:
@@ -267,29 +305,35 @@ class ModelMetaclass(ABCMeta):
         else:
             json_encoder = pydantic_encoder
         pre_rv_new, post_rv_new = extract_root_validators(namespace)
+
+        exclude_from_namespace = fields | private_attributes.keys() | {'__slots__'}
         new_namespace = {
             '__config__': config,
             '__fields__': fields,
-            '__field_defaults__': fields_defaults,
             '__validators__': vg.validators,
-            '__pre_root_validators__': pre_root_validators + pre_rv_new,
-            '__post_root_validators__': post_root_validators + post_rv_new,
+            '__pre_root_validators__': unique_list(pre_root_validators + pre_rv_new),
+            '__post_root_validators__': unique_list(post_root_validators + post_rv_new),
             '__schema_cache__': {},
             '__json_encoder__': staticmethod(json_encoder),
             '__custom_root_type__': _custom_root_type,
-            **{n: v for n, v in namespace.items() if n not in fields},
+            '__private_attributes__': private_attributes,
+            '__slots__': slots | private_attributes.keys(),
+            **{n: v for n, v in namespace.items() if n not in exclude_from_namespace},
         }
 
         cls = super().__new__(mcs, name, bases, new_namespace, **kwargs)
-        cls.__signature__ = generate_model_signature(cls.__init__, fields, config)
+        # set __signature__ attr only for model class, but not for its instances
+        cls.__signature__ = ClassAttribute('__signature__', generate_model_signature(cls.__init__, fields, config))
         return cls
 
 
-class BaseModel(metaclass=ModelMetaclass):
+object_setattr = object.__setattr__
+
+
+class BaseModel(Representation, metaclass=ModelMetaclass):
     if TYPE_CHECKING:
         # populated by the metaclass, defined here to help IDEs only
         __fields__: Dict[str, ModelField] = {}
-        __field_defaults__: Dict[str, Any] = {}
         __validators__: Dict[str, AnyCallable] = {}
         __pre_root_validators__: List[AnyCallable]
         __post_root_validators__: List[Tuple[bool, AnyCallable]]
@@ -299,15 +343,12 @@ class BaseModel(metaclass=ModelMetaclass):
         __schema_cache__: 'DictAny' = {}
         __custom_root_type__: bool = False
         __signature__: 'Signature'
+        __private_attributes__: Dict[str, Any]
+        __fields_set__: SetStr = set()
 
     Config = BaseConfig
     __slots__ = ('__dict__', '__fields_set__')
-    # equivalent of inheriting from Representation
-    __repr_name__ = Representation.__repr_name__
-    __repr_str__ = Representation.__repr_str__
-    __pretty__ = Representation.__pretty__
-    __str__ = Representation.__str__
-    __repr__ = Representation.__repr__
+    __doc__ = ''  # Null out the Representation docstring
 
     def __init__(__pydantic_self__, **data: Any) -> None:
         """
@@ -316,42 +357,83 @@ class BaseModel(metaclass=ModelMetaclass):
         Raises ValidationError if the input data cannot be parsed to form a valid model.
         """
         # Uses something other than `self` the first arg to allow "self" as a settable attribute
-        if TYPE_CHECKING:
-            __pydantic_self__.__dict__: Dict[str, Any] = {}
-            __pydantic_self__.__fields_set__: 'SetStr' = set()
         values, fields_set, validation_error = validate_model(__pydantic_self__.__class__, data)
         if validation_error:
             raise validation_error
-        object.__setattr__(__pydantic_self__, '__dict__', values)
-        object.__setattr__(__pydantic_self__, '__fields_set__', fields_set)
+        object_setattr(__pydantic_self__, '__dict__', values)
+        object_setattr(__pydantic_self__, '__fields_set__', fields_set)
+        __pydantic_self__._init_private_attributes()
 
     @no_type_check
-    def __setattr__(self, name, value):
+    def __setattr__(self, name, value):  # noqa: C901 (ignore complexity)
+        if name in self.__private_attributes__:
+            return object_setattr(self, name, value)
+
         if self.__config__.extra is not Extra.allow and name not in self.__fields__:
             raise ValueError(f'"{self.__class__.__name__}" object has no field "{name}"')
         elif not self.__config__.allow_mutation:
             raise TypeError(f'"{self.__class__.__name__}" is immutable and does not support item assignment')
         elif self.__config__.validate_assignment:
+            new_values = {**self.__dict__, name: value}
+
+            for validator in self.__pre_root_validators__:
+                try:
+                    new_values = validator(self.__class__, new_values)
+                except (ValueError, TypeError, AssertionError) as exc:
+                    raise ValidationError([ErrorWrapper(exc, loc=ROOT_KEY)], self.__class__)
+
             known_field = self.__fields__.get(name, None)
             if known_field:
-                value, error_ = known_field.validate(value, self.dict(exclude={name}), loc=name, cls=self.__class__)
+                # We want to
+                # - make sure validators are called without the current value for this field inside `values`
+                # - keep other values (e.g. submodels) untouched (using `BaseModel.dict()` will change them into dicts)
+                # - keep the order of the fields
+                dict_without_original_value = {k: v for k, v in self.__dict__.items() if k != name}
+                value, error_ = known_field.validate(value, dict_without_original_value, loc=name, cls=self.__class__)
                 if error_:
                     raise ValidationError([error_], self.__class__)
+                else:
+                    new_values[name] = value
+
+            errors = []
+            for skip_on_failure, validator in self.__post_root_validators__:
+                if skip_on_failure and errors:
+                    continue
+                try:
+                    new_values = validator(self.__class__, new_values)
+                except (ValueError, TypeError, AssertionError) as exc:
+                    errors.append(ErrorWrapper(exc, loc=ROOT_KEY))
+            if errors:
+                raise ValidationError(errors, self.__class__)
+
         self.__dict__[name] = value
         self.__fields_set__.add(name)
 
     def __getstate__(self) -> 'DictAny':
-        return {'__dict__': self.__dict__, '__fields_set__': self.__fields_set__}
+        return {
+            '__dict__': self.__dict__,
+            '__fields_set__': self.__fields_set__,
+            '__private_attribute_values__': {k: getattr(self, k, Undefined) for k in self.__private_attributes__},
+        }
 
     def __setstate__(self, state: 'DictAny') -> None:
-        object.__setattr__(self, '__dict__', state['__dict__'])
-        object.__setattr__(self, '__fields_set__', state['__fields_set__'])
+        object_setattr(self, '__dict__', state['__dict__'])
+        object_setattr(self, '__fields_set__', state['__fields_set__'])
+        for name, value in state.get('__private_attribute_values__', {}).items():
+            if value is not Undefined:
+                object_setattr(self, name, value)
+
+    def _init_private_attributes(self) -> None:
+        for name, private_attr in self.__private_attributes__.items():
+            default = private_attr.get_default()
+            if default is not Undefined:
+                object_setattr(self, name, default)
 
     def dict(
         self,
         *,
-        include: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
-        exclude: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
+        include: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
+        exclude: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
         by_alias: bool = False,
         skip_defaults: bool = None,
         exclude_unset: bool = False,
@@ -384,8 +466,8 @@ class BaseModel(metaclass=ModelMetaclass):
     def json(
         self,
         *,
-        include: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
-        exclude: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
+        include: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
+        exclude: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
         by_alias: bool = False,
         skip_defaults: bool = None,
         exclude_unset: bool = False,
@@ -484,8 +566,9 @@ class BaseModel(metaclass=ModelMetaclass):
         values, fields_set, validation_error = validate_model(cls, obj)
         if validation_error:
             raise validation_error
-        object.__setattr__(m, '__dict__', values)
-        object.__setattr__(m, '__fields_set__', fields_set)
+        object_setattr(m, '__dict__', values)
+        object_setattr(m, '__fields_set__', fields_set)
+        m._init_private_attributes()
         return m
 
     @classmethod
@@ -495,17 +578,21 @@ class BaseModel(metaclass=ModelMetaclass):
         Default values are respected, but no other validation is performed.
         """
         m = cls.__new__(cls)
-        object.__setattr__(m, '__dict__', {**deepcopy(cls.__field_defaults__), **values})
+        # default field values
+        fields_values = {name: field.get_default() for name, field in cls.__fields__.items() if not field.required}
+        fields_values.update(values)
+        object_setattr(m, '__dict__', fields_values)
         if _fields_set is None:
             _fields_set = set(values.keys())
-        object.__setattr__(m, '__fields_set__', _fields_set)
+        object_setattr(m, '__fields_set__', _fields_set)
+        m._init_private_attributes()
         return m
 
     def copy(
         self: 'Model',
         *,
-        include: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
-        exclude: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
+        include: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
+        exclude: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
         update: 'DictStrAny' = None,
         deep: bool = False,
     ) -> 'Model':
@@ -526,28 +613,40 @@ class BaseModel(metaclass=ModelMetaclass):
         )
 
         if deep:
+            # chances of having empty dict here are quite low for using smart_deepcopy
             v = deepcopy(v)
 
         cls = self.__class__
         m = cls.__new__(cls)
-        object.__setattr__(m, '__dict__', v)
-        object.__setattr__(m, '__fields_set__', self.__fields_set__.copy())
+        object_setattr(m, '__dict__', v)
+        object_setattr(m, '__fields_set__', self.__fields_set__.copy())
+        for name in self.__private_attributes__:
+            value = getattr(self, name, Undefined)
+            if value is not Undefined:
+                if deep:
+                    value = deepcopy(value)
+                object_setattr(m, name, value)
+
         return m
 
     @classmethod
-    def schema(cls, by_alias: bool = True) -> 'DictStrAny':
-        cached = cls.__schema_cache__.get(by_alias)
+    def schema(cls, by_alias: bool = True, ref_template: str = default_ref_template) -> 'DictStrAny':
+        cached = cls.__schema_cache__.get((by_alias, ref_template))
         if cached is not None:
             return cached
-        s = model_schema(cls, by_alias=by_alias)
-        cls.__schema_cache__[by_alias] = s
+        s = model_schema(cls, by_alias=by_alias, ref_template=ref_template)
+        cls.__schema_cache__[(by_alias, ref_template)] = s
         return s
 
     @classmethod
-    def schema_json(cls, *, by_alias: bool = True, **dumps_kwargs: Any) -> str:
+    def schema_json(
+        cls, *, by_alias: bool = True, ref_template: str = default_ref_template, **dumps_kwargs: Any
+    ) -> str:
         from .json import pydantic_encoder
 
-        return cls.__config__.json_dumps(cls.schema(by_alias=by_alias), default=pydantic_encoder, **dumps_kwargs)
+        return cls.__config__.json_dumps(
+            cls.schema(by_alias=by_alias, ref_template=ref_template), default=pydantic_encoder, **dumps_kwargs
+        )
 
     @classmethod
     def __get_validators__(cls) -> 'CallableGenerator':
@@ -581,8 +680,8 @@ class BaseModel(metaclass=ModelMetaclass):
         v: Any,
         to_dict: bool,
         by_alias: bool,
-        include: Optional[Union['AbstractSetIntStr', 'DictIntStrAny']],
-        exclude: Optional[Union['AbstractSetIntStr', 'DictIntStrAny']],
+        include: Optional[Union['AbstractSetIntStr', 'MappingIntStrAny']],
+        exclude: Optional[Union['AbstractSetIntStr', 'MappingIntStrAny']],
         exclude_unset: bool,
         exclude_defaults: bool,
         exclude_none: bool,
@@ -590,7 +689,7 @@ class BaseModel(metaclass=ModelMetaclass):
 
         if isinstance(v, BaseModel):
             if to_dict:
-                return v.dict(
+                v_dict = v.dict(
                     by_alias=by_alias,
                     exclude_unset=exclude_unset,
                     exclude_defaults=exclude_defaults,
@@ -598,6 +697,9 @@ class BaseModel(metaclass=ModelMetaclass):
                     exclude=exclude,
                     exclude_none=exclude_none,
                 )
+                if '__root__' in v_dict:
+                    return v_dict['__root__']
+                return v_dict
             else:
                 return v.copy(include=include, exclude=exclude)
 
@@ -638,6 +740,9 @@ class BaseModel(metaclass=ModelMetaclass):
                 and (not value_include or value_include.is_included(i))
             )
 
+        elif isinstance(v, Enum) and getattr(cls.Config, 'use_enum_values', False):
+            return v.value
+
         else:
             return v
 
@@ -661,8 +766,8 @@ class BaseModel(metaclass=ModelMetaclass):
         self,
         to_dict: bool = False,
         by_alias: bool = False,
-        include: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
-        exclude: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
+        include: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
+        exclude: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
         exclude_unset: bool = False,
         exclude_defaults: bool = False,
         exclude_none: bool = False,
@@ -677,32 +782,34 @@ class BaseModel(metaclass=ModelMetaclass):
         value_exclude = ValueItems(self, exclude) if exclude else None
         value_include = ValueItems(self, include) if include else None
 
-        for k, v in self.__dict__.items():
+        for field_key, v in self.__dict__.items():
             if (
-                (allowed_keys is not None and k not in allowed_keys)
+                (allowed_keys is not None and field_key not in allowed_keys)
                 or (exclude_none and v is None)
-                or (exclude_defaults and self.__field_defaults__.get(k, _missing) == v)
+                or (exclude_defaults and getattr(self.__fields__.get(field_key), 'default', _missing) == v)
             ):
                 continue
-            if by_alias and k in self.__fields__:
-                k = self.__fields__[k].alias
+            if by_alias and field_key in self.__fields__:
+                dict_key = self.__fields__[field_key].alias
+            else:
+                dict_key = field_key
             if to_dict or value_include or value_exclude:
                 v = self._get_value(
                     v,
                     to_dict=to_dict,
                     by_alias=by_alias,
-                    include=value_include and value_include.for_element(k),
-                    exclude=value_exclude and value_exclude.for_element(k),
+                    include=value_include and value_include.for_element(field_key),
+                    exclude=value_exclude and value_exclude.for_element(field_key),
                     exclude_unset=exclude_unset,
                     exclude_defaults=exclude_defaults,
                     exclude_none=exclude_none,
                 )
-            yield k, v
+            yield dict_key, v
 
     def _calculate_keys(
         self,
-        include: Optional[Union['AbstractSetIntStr', 'DictIntStrAny']],
-        exclude: Optional[Union['AbstractSetIntStr', 'DictIntStrAny']],
+        include: Optional[Union['AbstractSetIntStr', 'MappingIntStrAny']],
+        exclude: Optional[Union['AbstractSetIntStr', 'MappingIntStrAny']],
         exclude_unset: bool,
         update: Optional['DictStrAny'] = None,
     ) -> Optional[AbstractSet[str]]:
@@ -716,7 +823,7 @@ class BaseModel(metaclass=ModelMetaclass):
             keys = self.__dict__.keys()
 
         if include is not None:
-            if isinstance(include, dict):
+            if isinstance(include, Mapping):
                 keys &= include.keys()
             else:
                 keys &= include
@@ -725,7 +832,7 @@ class BaseModel(metaclass=ModelMetaclass):
             keys -= update.keys()
 
         if exclude:
-            if isinstance(exclude, dict):
+            if isinstance(exclude, Mapping):
                 keys -= {k for k, v in exclude.items() if v is ...}
             else:
                 keys -= exclude
@@ -756,23 +863,29 @@ class BaseModel(metaclass=ModelMetaclass):
         return self.__dict__
 
 
+_is_base_model_class_defined = True
+
+
 def create_model(
-    model_name: str,
+    __model_name: str,
     *,
     __config__: Type[BaseConfig] = None,
     __base__: Type[BaseModel] = None,
-    __module__: Optional[str] = None,
+    __module__: str = __name__,
     __validators__: Dict[str, classmethod] = None,
     **field_definitions: Any,
 ) -> Type[BaseModel]:
     """
     Dynamically create a model.
-    :param model_name: name of the created model
+    :param __model_name: name of the created model
     :param __config__: config class to use for the new model
     :param __base__: base class for the new model to inherit from
+    :param __module__: module of the created model
     :param __validators__: a dict of method names and @validator class methods
-    :param **field_definitions: fields of the model (or extra fields if a base is supplied) in the format
-        `<name>=(<type>, <default default>)` or `<name>=<default value> eg. `foobar=(str, ...)` or `foobar=123`
+    :param field_definitions: fields of the model (or extra fields if a base is supplied)
+        in the format `<name>=(<type>, <default default>)` or `<name>=<default value>, e.g.
+        `foobar=(str, ...)` or `foobar=123`, or, for complex use-cases, in the format
+        `<name>=<FieldInfo>`, e.g. `foo=Field(default_factory=datetime.utcnow, alias='bar')`
     """
     if __base__:
         if __config__ is not None:
@@ -791,9 +904,9 @@ def create_model(
                 f_annotation, f_value = f_def
             except ValueError as e:
                 raise ConfigError(
-                    f'field definitions should either be a tuple of (<type>, <default>) or just a '
-                    f'default value, unfortunately this means tuples as '
-                    f'default values are not allowed'
+                    'field definitions should either be a tuple of (<type>, <default>) or just a '
+                    'default value, unfortunately this means tuples as '
+                    'default values are not allowed'
                 ) from e
         else:
             f_annotation, f_value = None, f_def
@@ -809,7 +922,7 @@ def create_model(
     if __config__:
         namespace['Config'] = inherit_config(__config__, BaseConfig)
 
-    return type(model_name, (__base__,), namespace)
+    return type(__model_name, (__base__,), namespace)
 
 
 _missing = object()
@@ -894,7 +1007,6 @@ def validate_model(  # noqa: C901 (ignore complexity)
             values = validator(cls_, values)
         except (ValueError, TypeError, AssertionError) as exc:
             errors.append(ErrorWrapper(exc, loc=ROOT_KEY))
-            break
 
     if errors:
         return values, fields_set, ValidationError(errors, cls_)

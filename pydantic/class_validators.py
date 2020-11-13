@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional,
 
 from .errors import ConfigError
 from .typing import AnyCallable
-from .utils import in_ipython
+from .utils import ROOT_KEY, in_ipython
 
 
 class Validator:
@@ -33,8 +33,8 @@ class Validator:
 if TYPE_CHECKING:
     from inspect import Signature
 
-    from .main import BaseConfig
     from .fields import ModelField
+    from .main import BaseConfig
     from .types import ModelOrDc
 
     ValidatorCallable = Callable[[Optional[ModelOrDc], Any, Dict[str, Any], ModelField, Type[BaseConfig]], Any]
@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     ValidatorListDict = Dict[str, List[Validator]]
 
 _FUNCS: Set[str] = set()
-ROOT_KEY = '__root__'
 VALIDATOR_CONFIG_KEY = '__validator_config__'
 ROOT_VALIDATOR_CONFIG_KEY = '__root_validator_config__'
 
@@ -164,11 +163,9 @@ class ValidatorGroup:
 
     def check_for_unused(self) -> None:
         unused_validators = set(
-            chain(
-                *[
-                    (v.func.__name__ for v in self.validators[f] if v.check_fields)
-                    for f in (self.validators.keys() - self.used_validators)
-                ]
+            chain.from_iterable(
+                (v.func.__name__ for v in self.validators[f] if v.check_fields)
+                for f in (self.validators.keys() - self.used_validators)
             )
         )
         if unused_validators:

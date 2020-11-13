@@ -5,16 +5,20 @@ Do a little skipping about with types to demonstrate its usage.
 """
 import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-from pydantic import BaseModel, NoneStr, StrictBool, root_validator, validate_arguments, validator
-from pydantic.fields import Field
+from pydantic import BaseModel, NoneStr, PyObject, StrictBool, root_validator, validate_arguments, validator
+from pydantic.fields import Field, PrivateAttr
 from pydantic.generics import GenericModel
+from pydantic.typing import ForwardRef
 
 
 class Flags(BaseModel):
     strict_bool: StrictBool = False
+
+    def __str__(self) -> str:
+        return f'flag={self.strict_bool}'
 
 
 class Model(BaseModel):
@@ -117,6 +121,7 @@ class WithField(BaseModel):
     first_name: str = Field('John', const=True)
 
 
+# simple decorator
 @validate_arguments
 def foo(a: int, *, c: str = 'x') -> str:
     return c * a
@@ -124,3 +129,34 @@ def foo(a: int, *, c: str = 'x') -> str:
 
 foo(1, c='thing')
 foo(1)
+
+
+# nested decorator should not produce an error
+@validate_arguments(config={'arbitrary_types_allowed': True})
+def bar(a: int, *, c: str = 'x') -> str:
+    return c * a
+
+
+bar(1, c='thing')
+bar(1)
+
+
+class Foo(BaseModel):
+    a: int
+
+
+FooRef = ForwardRef('Foo')
+
+
+class MyConf(BaseModel):
+    str_pyobject: PyObject = Field('datetime.date')
+    callable_pyobject: PyObject = Field(date)
+
+
+conf = MyConf()
+var1: date = conf.str_pyobject(2020, 12, 20)
+var2: date = conf.callable_pyobject(2111, 1, 1)
+
+
+class MyPrivateAttr(BaseModel):
+    _private_field: str = PrivateAttr()

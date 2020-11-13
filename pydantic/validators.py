@@ -1,6 +1,6 @@
 import re
-import sys
-from collections import OrderedDict
+from collections import OrderedDict, deque
+from collections.abc import Hashable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, DecimalException
 from enum import Enum, IntEnum
@@ -10,6 +10,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Deque,
     Dict,
     FrozenSet,
     Generator,
@@ -25,7 +26,15 @@ from uuid import UUID
 
 from . import errors
 from .datetime_parse import parse_date, parse_datetime, parse_duration, parse_time
-from .typing import AnyCallable, AnyType, ForwardRef, display_as_type, get_class, is_callable_type, is_literal_type
+from .typing import (
+    AnyCallable,
+    ForwardRef,
+    all_literal_values,
+    display_as_type,
+    get_class,
+    is_callable_type,
+    is_literal_type,
+)
 from .utils import almost_equal_floats, lenient_issubclass, sequence_like
 
 if TYPE_CHECKING:
@@ -237,12 +246,21 @@ def frozenset_validator(v: Any) -> FrozenSet[Any]:
         raise errors.FrozenSetError()
 
 
-def enum_validator(v: Any, field: 'ModelField', config: 'BaseConfig') -> Enum:
+def deque_validator(v: Any) -> Deque[Any]:
+    if isinstance(v, deque):
+        return v
+    elif sequence_like(v):
+        return deque(v)
+    else:
+        raise errors.DequeError()
+
+
+def enum_member_validator(v: Any, field: 'ModelField', config: 'BaseConfig') -> Enum:
     try:
         enum_v = field.type_(v)
     except ValueError:
         # field.type_ should be an enum, so will be iterable
-        raise errors.EnumError(enum_values=list(field.type_))
+        raise errors.EnumMemberError(enum_values=list(field.type_))
     return enum_v.value if config.use_enum_values else enum_v
 
 
@@ -251,7 +269,12 @@ def uuid_validator(v: Any, field: 'ModelField') -> UUID:
         if isinstance(v, str):
             v = UUID(v)
         elif isinstance(v, (bytes, bytearray)):
-            v = UUID(v.decode())
+            try:
+                v = UUID(v.decode())
+            except ValueError:
+                # 16 bytes in big-endian order as the bytes argument fail
+                # the above check
+                v = UUID(bytes=v)
     except ValueError:
         raise errors.UUIDError()
 
@@ -282,6 +305,13 @@ def decimal_validator(v: Any) -> Decimal:
         raise errors.DecimalIsNotFiniteError()
 
     return v
+
+
+def hashable_validator(v: Any) -> Hashable:
+    if isinstance(v, Hashable):
+        return v
+
+    raise errors.HashableError()
 
 
 def ip_v4_address_validator(v: Any) -> IPv4Address:
@@ -385,11 +415,22 @@ def callable_validator(v: Any) -> AnyCallable:
     raise errors.CallableError(value=v)
 
 
+def enum_validator(v: Any) -> Enum:
+    if isinstance(v, Enum):
+        return v
+
+    raise errors.EnumError(value=v)
+
+
+def int_enum_validator(v: Any) -> IntEnum:
+    if isinstance(v, IntEnum):
+        return v
+
+    raise errors.IntEnumError(value=v)
+
+
 def make_literal_validator(type_: Any) -> Callable[[Any], Any]:
-    if sys.version_info >= (3, 7):
-        permitted_choices = type_.__args__
-    else:
-        permitted_choices = type_.__values__
+    permitted_choices = all_literal_values(type_)
     allowed_choices_set = set(permitted_choices)
 
     def literal_validator(v: Any) -> Any:
@@ -484,9 +525,9 @@ class IfConfig:
 
 # order is important here, for example: bool is a subclass of int so has to come first, datetime before date same,
 # IPv4Interface before IPv4Address, etc
-_VALIDATORS: List[Tuple[AnyType, List[Any]]] = [
-    (IntEnum, [int_validator, enum_validator]),
-    (Enum, [enum_validator]),
+_VALIDATORS: List[Tuple[Type[Any], List[Any]]] = [
+    (IntEnum, [int_validator, enum_member_validator]),
+    (Enum, [enum_member_validator]),
     (
         str,
         [
@@ -517,6 +558,7 @@ _VALIDATORS: List[Tuple[AnyType, List[Any]]] = [
     (tuple, [tuple_validator]),
     (set, [set_validator]),
     (frozenset, [frozenset_validator]),
+    (deque, [deque_validator]),
     (UUID, [uuid_validator]),
     (Decimal, [decimal_validator]),
     (IPv4Interface, [ip_v4_interface_validator]),
@@ -529,8 +571,10 @@ _VALIDATORS: List[Tuple[AnyType, List[Any]]] = [
 
 
 def find_validators(  # noqa: C901 (ignore complexity)
-    type_: AnyType, config: Type['BaseConfig']
+    type_: Type[Any], config: Type['BaseConfig']
 ) -> Generator[AnyCallable, None, None]:
+    from .dataclasses import is_builtin_dataclass, make_dataclass_validator
+
     if type_ is Any:
         return
     type_type = type_.__class__
@@ -539,11 +583,23 @@ def find_validators(  # noqa: C901 (ignore complexity)
     if type_ is Pattern:
         yield pattern_validator
         return
+    if type_ is Hashable:
+        yield hashable_validator
+        return
     if is_callable_type(type_):
         yield callable_validator
         return
     if is_literal_type(type_):
         yield make_literal_validator(type_)
+        return
+    if is_builtin_dataclass(type_):
+        yield from make_dataclass_validator(type_, config)
+        return
+    if type_ is Enum:
+        yield enum_validator
+        return
+    if type_ is IntEnum:
+        yield int_enum_validator
         return
 
     class_ = get_class(type_)
